@@ -3,16 +3,21 @@ package esprit.project_cloasrail.service;
 import esprit.project_cloasrail.model.Route;
 import esprit.project_cloasrail.model.Station;
 import esprit.project_cloasrail.model.Train;
+import esprit.project_cloasrail.model.ItineraryStop;
 import esprit.project_cloasrail.repository.StationRepository;
 import esprit.project_cloasrail.repository.RouteRepository;
 import esprit.project_cloasrail.repository.TrainRepository;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.GeometryFactory;
+import org.locationtech.jts.geom.LineString;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.File;
@@ -21,6 +26,8 @@ import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.*;
+
+import static java.util.Arrays.stream;
 
 @Service
 @RestController
@@ -32,6 +39,7 @@ public class TrainService {
     private RouteRepository routeRepository;
     @Autowired
     private TrainRepository trainRepository;
+    private final GeometryFactory geometryFactory = new GeometryFactory();
 
     private final Map<String, double[]> stationCoordinates = new HashMap<>() {{
         put("2001D", new double[]{36.79657, 10.17979}); // Tunis Ville Barcelone
@@ -43,8 +51,8 @@ public class TrainService {
         put("2005E", new double[]{36.78042, 10.10238}); // Bougatfa
         put("1015D", new double[]{36.82014, 10.07461}); // Gobaa
         put("ORG", new double[]{36.81844, 10.08582}); // Les Orangers
-        put("MNB", new double[]{36.800, 10.1000}); // Manouba
-        put("ELB", new double[]{36.8050, 10.1100}); // El Bortal
+        put("MNB", new double[]{36.80239490515073, 10.101752298304426}); // Manouba
+        put("ELB", new double[]{36.812864424344035, 10.116263898924096  }); // El Bortal
         put("BRD", new double[]{36.80724, 10.13523}); // Bardo
         put("ERD", new double[]{36.801940, 10.14808}); // Erraoudha
         put("MLS", new double[]{36.791666, 10.15533}); // Mellassine
@@ -96,10 +104,10 @@ public class TrainService {
     }
 
     @Transactional
-    private void loadTimetableFromExcel(String filePath) {
+    public  void loadTimetableFromExcel(String filePath) {
         try (FileInputStream fis = new FileInputStream(filePath);
              Workbook workbook = new XSSFWorkbook(fis)) {
-            Map<String, List<Map<String, Object>>> trainData = new HashMap<>();
+            Map<String, List<ItineraryStop>> trainData = new HashMap<>();
             Map<String, Station> stationCache = new HashMap<>();
 
             for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
@@ -136,27 +144,27 @@ public class TrainService {
                         if (decimalTime == 0.0) continue;
 
                         LocalDateTime departureTime = convertDecimalToDateTime(decimalTime);
-
-                        Map<String, Object> stop = new HashMap<>();
-                        stop.put("locationSname", sname);
-                        stop.put("locationLname", stationName);
-                        stop.put("departureTime", departureTime);
+                        ItineraryStop stop = new ItineraryStop(stationName, departureTime.toString());
                         trainData.get(trainNumbers.get(i)).add(stop);
                     }
                 }
             }
 
-            for (Map.Entry<String, List<Map<String, Object>>> entry : trainData.entrySet()) {
+            for (Map.Entry<String, List<ItineraryStop>> entry : trainData.entrySet()) {
                 String trainNumber = entry.getKey();
-                List<Map<String, Object>> stops = entry.getValue();
+                List<ItineraryStop> stops = entry.getValue();
 
-                stops.sort(Comparator.comparing(stop -> (LocalDateTime) stop.get("departureTime")));
+                // Sort stops by time (if needed, though Excel order should be sufficient)
+                stops.sort(Comparator.comparing(ItineraryStop::getTime));
 
                 List<Station> stations = new ArrayList<>();
                 List<LocalDateTime> timetable = new ArrayList<>();
-                for (Map<String, Object> stop : stops) {
-                    String sname = (String) stop.get("locationSname");
-                    String lname = (String) stop.get("locationLname");
+                for (ItineraryStop stop : stops) {
+                    String sname = stationNameMapping.getOrDefault(stop.getStationName(), "");
+                    if (sname.isEmpty()) {
+                        System.out.println("No mapping found for station: " + stop.getStationName() + ", skipping.");
+                        continue;
+                    }
                     double[] coords = stationCoordinates.getOrDefault(sname, null);
                     if (coords == null) {
                         System.out.println("Missing coordinates for station: " + sname + ", skipping.");
@@ -164,11 +172,11 @@ public class TrainService {
                     }
 
                     Station station = stationCache.computeIfAbsent(sname, k -> {
-                        Station newStation = new Station(sname, lname, coords[0], coords[1]);
+                        Station newStation = new Station(sname, stop.getStationName(), coords[0], coords[1]);
                         return stationRepository.save(newStation);
                     });
                     stations.add(station);
-                    timetable.add((LocalDateTime) stop.get("departureTime"));
+                    timetable.add(LocalDateTime.parse(stop.getTime()));
                 }
 
                 if (stations.size() < 2) {
@@ -210,7 +218,7 @@ public class TrainService {
     private LocalDateTime convertDecimalToDateTime(double decimalDays) {
         long hours = (long) (decimalDays * 24);
         long minutes = (long) ((decimalDays * 24 * 60) % 60);
-        return LocalDateTime.of(2025, 1, 1, (int) hours, (int) minutes);
+        return LocalDateTime.of(2025, 7, 28, (int) hours, (int) minutes); // Align with current date
     }
 
     @GetMapping("/api/trains/live")
@@ -218,7 +226,7 @@ public class TrainService {
     public List<Train> getLiveTrains() {
         try {
             List<Train> trains = trainRepository.findAll();
-            LocalDateTime now = LocalDateTime.now(ZoneId.of("Europe/Paris")); // CET
+            LocalDateTime now = LocalDateTime.now(ZoneId.of("Africa/Tunis")); // 09:46 AM CET
             System.out.println("Calculating live positions at: " + now);
 
             for (Train train : trains) {
@@ -258,7 +266,11 @@ public class TrainService {
 
                     train.setLatitude(lat);
                     train.setLongitude(lon);
-                    train.setDelayed(now.isAfter(endTime)); // Mark as delayed if past scheduled arrival
+                    train.setDelayed(now.isAfter(endTime));
+
+                    System.out.println("Train " + train.getTrainNumber() + " at segment " + currentSegment +
+                            " (" + startStation.getName() + " to " + endStation.getName() +
+                            ") progress: " + String.format("%.2f", progress) + " at " + lat + ", " + lon);
                 }
             }
 
@@ -285,19 +297,37 @@ public class TrainService {
         }
     }
 
-    private double calculateProgress(LocalDateTime now, LocalDateTime startTime, LocalDateTime endTime) {
-        long startMillis = startTime.atZone(ZoneId.of("Europe/Paris")).toInstant().toEpochMilli();
-        long endMillis = endTime.atZone(ZoneId.of("Europe/Paris")).toInstant().toEpochMilli();
-        long nowMillis = now.atZone(ZoneId.of("Europe/Paris")).toInstant().toEpochMilli();
-        return (double) (nowMillis - startMillis) / (endMillis - startMillis);
-    }
-
-    private double interpolate(double start, double end, double progress) {
-        return start + (end - start) * Math.min(Math.max(progress, 0.0), 1.0);
-    }
-
+    @GetMapping("/api/trains/{trainNumber}/route")
     @Transactional(readOnly = true)
-    public List<Map<String, Object>> getTrainItinerary(String trainNumber) {
+    public LineString getTrainRoute(@PathVariable String trainNumber) {
+        try {
+            Optional<Train> trainOptional = trainRepository.findById(trainNumber);
+            if (trainOptional.isEmpty() || trainOptional.get().getRoute() == null) {
+                System.out.println("Train not found or no route associated: " + trainNumber);
+                return null;
+            }
+
+            Train train = trainOptional.get();
+            Route route = train.getRoute();
+            List<Station> stations = route.getStations();
+
+            Coordinate[] coordinates = new Coordinate[stations.size()];
+            for (int i = 0; i < stations.size(); i++) {
+                Station station = stations.get(i);
+                coordinates[i] = new Coordinate(station.getLongitude(), station.getLatitude());
+            }
+
+            return geometryFactory.createLineString(coordinates);
+        } catch (Exception e) {
+            System.err.println("Error retrieving route for train " + trainNumber + ": " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    @GetMapping("/api/trains/{trainNumber}/itinerary")
+    @Transactional(readOnly = true)
+    public List<ItineraryStop> getTrainItinerary(@PathVariable String trainNumber) {
         try {
             Optional<Train> trainOptional = trainRepository.findById(trainNumber);
             if (trainOptional.isEmpty() || trainOptional.get().getRoute() == null) {
@@ -315,11 +345,11 @@ public class TrainService {
                 return Collections.emptyList();
             }
 
-            List<Map<String, Object>> itinerary = new ArrayList<>();
+            List<ItineraryStop> itinerary = new ArrayList<>();
             for (int i = 0; i < stations.size(); i++) {
-                Map<String, Object> stop = new HashMap<>();
-                stop.put("stationName", stations.get(i).getName());
-                stop.put("time", timetable.get(i).toString());
+                ItineraryStop stop = new ItineraryStop();
+                stop.setStationName(stations.get(i).getName());
+                stop.setTime(timetable.get(i).toString());
                 itinerary.add(stop);
             }
             System.out.println("Retrieved itinerary for train: " + trainNumber + " with " + itinerary.size() + " stops.");
@@ -330,4 +360,18 @@ public class TrainService {
             return Collections.emptyList();
         }
     }
+
+    private double calculateProgress(LocalDateTime now, LocalDateTime startTime, LocalDateTime endTime) {
+        long startMillis = startTime.atZone(ZoneId.of("Africa/Tunis")).toInstant().toEpochMilli();
+        long endMillis = endTime.atZone(ZoneId.of("Africa/Tunis")).toInstant().toEpochMilli();
+        long nowMillis = now.atZone(ZoneId.of("Africa/Tunis")).toInstant().toEpochMilli();
+        double progress = (double) (nowMillis - startMillis) / (endMillis - startMillis);
+        return Math.min(Math.max(progress, 0.0), 1.0);
+    }
+
+    private double interpolate(double start, double end, double progress) {
+        return start + (end - start) * progress;
+    }
+
+
 }

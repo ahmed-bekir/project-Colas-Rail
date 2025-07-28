@@ -23,8 +23,5 @@ public class TrainController {
 
 
 
-    @GetMapping("/{trainNumber}/itinerary")
-    public List<Map<String, Object>> getTrainItinerary(@PathVariable String trainNumber) {
-        return trainService.getTrainItinerary(trainNumber);
-    }
+
 }
